@@ -1,0 +1,40 @@
+name: Monitoraggio Serchio
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: serchio
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install requests beautifulsoup4
+
+      - name: Controlla i livelli
+        env:
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          DASHBOARD_URL: ${{ vars.DASHBOARD_URL }}
+        run: python monitor.py
+
+      - name: Salva i dati
+        if: always()
+        run: |
+          git config user.name "serchio-bot"
+          git config user.email "serchio-bot@users.noreply.github.com"
+          git add data
+          git diff --cached --quiet || (git commit -m "dati $(date -u +%H:%M)" && git push)
