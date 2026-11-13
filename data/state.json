@@ -3,10 +3,10 @@
  "missing_notified": "",
  "stale_alerted": false,
  "levels": {
-  "TOS02004365": 5.67
+  "TOS02004365": 5.66
  },
  "trends": {
   "TOS02004365": "falling"
  },
- "last_stamp": "2026-11-13T11:20:00+01:00"
+ "last_stamp": "2026-11-13T11:25:00+01:00"
 }
