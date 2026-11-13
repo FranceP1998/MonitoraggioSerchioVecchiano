@@ -182,6 +182,13 @@ def soglia_text(level, soglie):
     return f"alla prima soglia ({fm(s1)}) mancano {fm(s1 - level)} m"
 
 
+def severity(level, soglie):
+    """0 sotto la prima soglia, 1 tra le due, 2 sopra la seconda."""
+    if len(soglie) != 2:
+        return 0
+    return 2 if level >= soglie[1] else 1 if level >= soglie[0] else 0
+
+
 def register_failure(state, message):
     state["fail"] = state.get("fail", 0) + 1
     if state["fail"] == 1 or state["fail"] % 4 == 0:
@@ -285,7 +292,7 @@ def process(body, html, rows, now):
             elif delta < -EPS:
                 trend = "falling"
                 if prev_trend != "falling":
-                    events.append(("down", f"▼ {s['name']}: {fm(level)} m ({fd(delta)}), primo calo"))
+                    events.append(("down", f"▼ {s['name']}: {fm(level)} m ({fd(delta)}), primo calo{extra}"))
             else:
                 if prev_trend == "rising":
                     trend = "steady"
@@ -299,27 +306,33 @@ def process(body, html, rows, now):
             "stamp": (r["stamp"] or stamp).isoformat(), "raw": r["raw"],
         })
 
+    sev = max((severity(c["level"], c["soglie"]) for c in cards), default=0)
+    icon = {0: "✅", 1: "⚠️", 2: "🚨"}[sev]
+
     if first_run:
         lines = []
         for c in cards:
             t = soglia_text(c["level"], c["soglie"])
             lines.append(f"{c['name']}: {fm(c['level'])} m" + (f" ({t})" if t else ""))
         send_ntfy(
-            "✅ Serchio: monitoraggio attivo",
+            f"{icon} Serchio: monitoraggio attivo",
             f"Dati delle {stamp:%H:%M}\n" + "\n".join(lines),
-            priority=3,
-            tags=["white_check_mark"],
+            priority={0: 3, 1: 4, 2: 5}[sev],
+            tags=[{0: "white_check_mark", 1: "warning", 2: "rotating_light"}[sev]],
         )
     elif events:
         kinds = {k for k, _ in events}
         if "soglia" in kinds:
             title, prio, tags = "🚨 Serchio: soglia superata", 5, ["rotating_light"]
         elif "up" in kinds:
-            title, prio, tags = "🔺 Serchio: livello in salita", 4, ["warning"]
+            title, prio, tags = ("🚨 Serchio: livello in salita", 5, ["rotating_light"]) if sev == 2 \
+                else ("🔺 Serchio: livello in salita", 4, ["warning"])
         elif "down" in kinds:
-            title, prio, tags = "🔻 Serchio: livello in calo", 3, ["arrow_down"]
+            title, prio, tags = ("🔻 Serchio: in calo, ancora sopra soglia", 4, ["warning"]) if sev >= 1 \
+                else ("🔻 Serchio: livello in calo", 3, ["arrow_down"])
         else:
-            title, prio, tags = "Serchio: livello stabile", 3, ["information_source"]
+            title, prio, tags = ("🚨 Serchio: livello stabile, sopra soglia", 5, ["rotating_light"]) if sev == 2 \
+                else ("Serchio: livello stabile", 4 if sev == 1 else 3, ["information_source"])
         send_ntfy(
             title,
             "\n".join(t for _, t in events) + f"\nDati delle {stamp:%H:%M}",
