@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 """Monitoraggio idrometri del Serchio (CFR Toscana) con notifiche ntfy.
 
+La pagina del CFR costruisce la tabella con JavaScript, quindi viene aperta
+con un browser vero (Playwright) e si legge la riga di ogni stazione.
+
 Regole di notifica (per ogni idrometro, ad ogni nuova lettura del CFR):
   - livello in salita            -> notifica a ogni lettura (circa ogni 15 minuti)
   - prima lettura in discesa     -> una notifica
   - discesa che continua         -> nessuna notifica
   - livello che torna a salire   -> si ricomincia a notificare
   - salita che si ferma          -> una notifica ("livello stabile")
+  - superamento di una soglia    -> notifica urgente
 Se i dati non si leggono o restano fermi, arriva un avviso: il silenzio non
 deve mai voler dire "tutto bene" per errore.
 """
@@ -19,19 +23,21 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import requests
-from bs4 import BeautifulSoup
 
 ROOT = Path(__file__).resolve().parent
 DATA = ROOT / "data"
 URL = "https://www.cfr.toscana.it/monitoraggio/stazioni.php?type=idro"
+UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
+      "Chrome/124.0 Safari/537.36")
 
 EPS = 0.02          # metri: variazioni più piccole contano come "stabile"
 MAX_HISTORY = 600   # letture conservate (circa 6 giorni)
 STALE_MIN = 60      # minuti senza nuovi dati prima di avvisare
 CET = timezone(timedelta(hours=1))  # il CFR pubblica in ora solare
 
-STAMP_RE = re.compile(r"riferiti al (\d{2})/(\d{2})/(\d{4}) (\d{2})[.:](\d{2})")
-NUM_RE = re.compile(r"^-?\d+(?:[.,]\d+)?(?:\s*(?:m|mc/s|m3/s))?$", re.I)
+PAGE_STAMP_RE = re.compile(r"riferiti al (\d{2})/(\d{2})/(\d{4}) (\d{2})[.:](\d{2})")
+ROW_STAMP_RE = re.compile(r"(\d{2})/(\d{2})\s+(\d{2})[.:](\d{2})")
+NUM_RE = re.compile(r"-?\d+(?:[.,]\d+)?")
 
 
 # ---------- utilità ----------
@@ -75,53 +81,106 @@ def send_ntfy(title, message, priority=3, tags=None):
 
 # ---------- lettura dal CFR ----------
 
-def fetch_html():
-    r = requests.get(
-        URL,
-        timeout=30,
-        headers={"User-Agent": "Mozilla/5.0 (compatible; serchio-monitor)"},
-    )
-    r.raise_for_status()
-    return r.text
+def cells_from_text(body, code):
+    """Se la pagina non usa una vera tabella: spezzo il testo dopo il codice."""
+    i = body.find(code)
+    if i < 0:
+        return None
+    nxt = re.search(r"TOS\d{8}", body[i + len(code):])
+    seg = body[i: i + len(code) + (nxt.start() if nxt else 600)]
+    return [t for t in re.split(r"[\t\n]+", seg) if t.strip()]
 
 
-def to_float(text):
-    m = re.search(r"-?\d+(?:[.,]\d+)?", text)
-    return float(m.group(0).replace(",", ".")) if m else None
+def fetch_rows(stations):
+    """Apre la pagina con un browser e ritorna (testo, html, {id: celle})."""
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_context(user_agent=UA, locale="it-IT").new_page()
+        page.goto(URL, wait_until="networkidle", timeout=60000)
+        try:
+            page.wait_for_function(
+                "c => document.body.innerText.includes(c)",
+                arg=stations[0]["id"], timeout=30000,
+            )
+        except Exception:
+            pass
+        page.wait_for_timeout(1500)
+        body = page.inner_text("body")
+        html = page.content()
+        rows = {}
+        for s in stations:
+            loc = page.locator("tr", has_text=s["id"])
+            cells = loc.last.locator("td,th").all_inner_texts() if loc.count() else None
+            if not cells:
+                cells = cells_from_text(body, s["id"])
+            if cells:
+                rows[s["id"]] = cells
+        browser.close()
+    return body, html, rows
 
 
-def parse(html, stations):
-    """Ritorna (orario dei dati, {id: {level, numbers, raw}})."""
-    soup = BeautifulSoup(html, "html.parser")
-    m = STAMP_RE.search(soup.get_text(" ", strip=True))
+def page_stamp(body):
+    m = PAGE_STAMP_RE.search(body)
+    if not m:
+        return None
+    d, mo, y, h, mi = map(int, m.groups())
+    return datetime(y, mo, d, h, mi, tzinfo=CET)
+
+
+def parse_station(cells, ref_stamp):
+    """Riga: codice, fiume, stazione, prov, zona, soglia2, soglia1, livello,
+    portata, variazioni 15'/30'/1h, data e ora dell'ultimo dato."""
+    cells = [re.sub(r"\s+", " ", c).strip() for c in cells]
+    cells = [c for c in cells if c]
+    zone = None
+    for i in range(1, len(cells)):
+        if re.fullmatch(r"[A-Z]{2}", cells[i - 1]) and re.fullmatch(r"[A-Z]\d?", cells[i]):
+            zone = i
+            break
+    if zone is None:
+        return None
+    tail = re.sub(r"[↑↓→↗↘]", " ", " ".join(cells[zone + 1:]))
+
     stamp = None
+    m = ROW_STAMP_RE.search(tail)
     if m:
-        d, mo, y, h, mi = map(int, m.groups())
-        stamp = datetime(y, mo, d, h, mi, tzinfo=CET)
+        d, mo, h, mi = map(int, m.groups())
+        year = (ref_stamp or datetime.now(CET)).year
+        stamp = datetime(year, mo, d, h, mi, tzinfo=CET)
+        if ref_stamp and stamp > ref_stamp + timedelta(days=180):
+            stamp = stamp.replace(year=year - 1)
+        tail = tail.replace(m.group(0), " ")
 
-    readings = {}
-    for s in stations:
-        link = soup.find("a", href=re.compile(re.escape(s["id"])))
-        row = link.find_parent("tr") if link else None
-        if not row:
-            continue
-        numbers = []
-        for cell in row.find_all(["td", "th"]):
-            if link in cell.find_all("a"):
-                continue
-            text = cell.get_text(" ", strip=True)
-            if NUM_RE.match(text):
-                numbers.append(to_float(text))
-        if numbers:
-            readings[s["id"]] = {
-                "level": numbers[0],
-                "numbers": numbers,
-                "raw": row.get_text(" | ", strip=True),
-            }
-    return stamp, readings
+    vals = []
+    for tok in tail.split():
+        if NUM_RE.fullmatch(tok):
+            vals.append(float(tok.replace(",", ".")))
+        elif tok == "-":
+            vals.append(None)
+    if len(vals) != 7 or vals[2] is None:
+        return None
+    s2, s1, level, flow, d15, d30, d60 = vals
+    return {
+        "level": level, "flow": flow, "soglie": sorted(x for x in (s1, s2) if x is not None),
+        "var": {"15m": d15, "30m": d30, "1h": d60}, "stamp": stamp,
+        "raw": " | ".join(cells),
+    }
 
 
 # ---------- logica ----------
+
+def soglia_text(level, soglie):
+    if len(soglie) != 2:
+        return ""
+    s1, s2 = soglie
+    if level >= s2:
+        return f"sopra la seconda soglia ({fm(s2)})"
+    if level >= s1:
+        return f"sopra la prima soglia ({fm(s1)}), alla seconda mancano {fm(s2 - level)} m"
+    return f"alla prima soglia ({fm(s1)}) mancano {fm(s1 - level)} m"
+
 
 def register_failure(state, message):
     state["fail"] = state.get("fail", 0) + 1
@@ -134,17 +193,25 @@ def register_failure(state, message):
         )
 
 
-def process(html, now):
+def process(body, html, rows, now):
     stations = load_json(ROOT / "stations.json")["stations"]
     state = load_json(DATA / "state.json", {})
     history = load_json(DATA / "history.json", [])
     latest = load_json(DATA / "latest.json", {})
+    ref = page_stamp(body)
 
-    stamp, readings = parse(html, stations)
+    parsed, bad = {}, []
+    for s in stations:
+        r = parse_station(rows.get(s["id"], []), ref) if s["id"] in rows else None
+        if r:
+            parsed[s["id"]] = r
+        else:
+            bad.append(s["name"])
 
-    # lettura impossibile: avvisa e salva la pagina per capire cosa è cambiato
-    if stamp is None or not readings:
+    # nessuna stazione letta: avviso e file per capire cosa è cambiato
+    if not parsed:
         DATA.mkdir(exist_ok=True)
+        (DATA / "debug.txt").write_text(body[:30000], encoding="utf-8")
         (DATA / "debug.html").write_text(html[:200000], encoding="utf-8")
         register_failure(state, "Non trovo i livelli nella pagina del CFR.")
         latest.update({"ok": False, "checked": now.isoformat(), "error": "lettura non riuscita"})
@@ -153,15 +220,19 @@ def process(html, now):
         return
 
     state["fail"] = 0
+    stamps = [r["stamp"] for r in parsed.values() if r["stamp"]] or ([ref] if ref else [])
+    if not stamps:
+        register_failure(state, "Non trovo l'orario dei dati.")
+        save_json(DATA / "state.json", state)
+        return
+    stamp = max(stamps)
     stamp_iso = stamp.isoformat()
 
-    # idrometri configurati ma non trovati nella pagina
-    missing = [s["name"] for s in stations if s["id"] not in readings]
-    key = ",".join(missing)
+    key = ",".join(bad)
     if key and key != state.get("missing_notified"):
         send_ntfy(
             "⚠️ Serchio: idrometro non letto",
-            "Non riesco a leggere: " + ", ".join(missing) + ". Controlla a mano sul sito del CFR.",
+            "Non riesco a leggere: " + ", ".join(bad) + ". Controlla a mano sul sito del CFR.",
             priority=4,
             tags=["warning"],
         )
@@ -191,20 +262,26 @@ def process(html, now):
     events = []      # (tipo, testo)
     cards = []
     for s in stations:
-        r = readings.get(s["id"])
+        r = parsed.get(s["id"])
         if not r:
             continue
         level = r["level"]
+        sog = r["soglie"]
         prev = levels.get(s["id"])
         prev_trend = trends.get(s["id"], "steady")
         delta = None
         trend = prev_trend
+        extra = soglia_text(level, sog)
+        extra = f" – {extra}" if extra else ""
 
         if prev is not None:
             delta = round(level - prev, 3)
+            for i, name in enumerate(("prima", "seconda")):
+                if len(sog) == 2 and prev < sog[i] <= level:
+                    events.append(("soglia", f"🚨 {s['name']}: superata la {name} soglia ({fm(sog[i])} m), ora {fm(level)} m"))
             if delta > EPS:
                 trend = "rising"
-                events.append(("up", f"▲ {s['name']}: {fm(level)} m ({fd(delta)})"))
+                events.append(("up", f"▲ {s['name']}: {fm(level)} m ({fd(delta)}){extra}"))
             elif delta < -EPS:
                 trend = "falling"
                 if prev_trend != "falling":
@@ -212,28 +289,32 @@ def process(html, now):
             else:
                 if prev_trend == "rising":
                     trend = "steady"
-                    events.append(("flat", f"■ {s['name']}: {fm(level)} m, livello stabile"))
-                # se era in calo o stabile, resta com'era
+                    events.append(("flat", f"■ {s['name']}: {fm(level)} m, livello stabile{extra}"))
 
         levels[s["id"]] = level
         trends[s["id"]] = trend
         cards.append({
-            "id": s["id"], "name": s["name"], "level": level,
-            "delta": delta, "trend": trend, "numbers": r["numbers"], "raw": r["raw"],
+            "id": s["id"], "name": s["name"], "level": level, "delta": delta, "trend": trend,
+            "flow": r["flow"], "soglie": sog, "var": r["var"],
+            "stamp": (r["stamp"] or stamp).isoformat(), "raw": r["raw"],
         })
 
     if first_run:
-        lines = [f"{c['name']}: {fm(c['level'])} m" for c in cards]
+        lines = []
+        for c in cards:
+            t = soglia_text(c["level"], c["soglie"])
+            lines.append(f"{c['name']}: {fm(c['level'])} m" + (f" ({t})" if t else ""))
         send_ntfy(
             "✅ Serchio: monitoraggio attivo",
-            f"Dati delle {stamp:%H:%M}\n" + "\n".join(lines)
-            + "\nSe un valore non ti sembra un livello in metri, dimmelo.",
+            f"Dati delle {stamp:%H:%M}\n" + "\n".join(lines),
             priority=3,
             tags=["white_check_mark"],
         )
     elif events:
         kinds = {k for k, _ in events}
-        if "up" in kinds:
+        if "soglia" in kinds:
+            title, prio, tags = "🚨 Serchio: soglia superata", 5, ["rotating_light"]
+        elif "up" in kinds:
             title, prio, tags = "🔺 Serchio: livello in salita", 4, ["warning"]
         elif "down" in kinds:
             title, prio, tags = "🔻 Serchio: livello in calo", 3, ["arrow_down"]
@@ -256,16 +337,18 @@ def process(html, now):
         "updated": stamp_iso,
         "checked": now.isoformat(),
         "stations": cards,
-        "missing": missing,
+        "missing": bad,
     })
     save_json(DATA / "state.json", state)
 
 
 def main():
     now = datetime.now(timezone.utc)
+    stations = load_json(ROOT / "stations.json")["stations"]
     try:
-        html = fetch_html()
+        body, html, rows = fetch_rows(stations)
     except Exception as exc:
+        traceback.print_exc()
         state = load_json(DATA / "state.json", {})
         register_failure(state, f"Il sito del CFR non risponde ({type(exc).__name__}).")
         save_json(DATA / "state.json", state)
@@ -274,7 +357,7 @@ def main():
         save_json(DATA / "latest.json", latest)
         return
     try:
-        process(html, now)
+        process(body, html, rows, now)
     except Exception:
         traceback.print_exc()
         send_ntfy("⚠️ Serchio: errore nello script",
