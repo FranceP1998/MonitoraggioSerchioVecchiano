@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Serchio">
+<meta name="color-scheme" content="light dark">
+<title>Serchio – livelli</title>
+<style>
+  :root {
+    --bg: #eef1f4; --surface: #ffffff; --text: #16202a; --muted: #5b6875;
+    --line: #0b5cab; --up: #c62828; --down: #1b7f4b; --flat: #5b6875;
+    --border: #d5dbe1; --warn-bg: #fff1d6; --warn-text: #6b4200;
+    color-scheme: light dark;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f151b; --surface: #18212a; --text: #e8edf2; --muted: #93a1ae;
+      --line: #6cb2ff; --up: #ff7a6b; --down: #4cc38a; --flat: #93a1ae;
+      --border: #2a3541; --warn-bg: #3a2b0c; --warn-text: #ffd48a;
+    }
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 16px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    padding: max(16px, env(safe-area-inset-top)) 16px max(24px, env(safe-area-inset-bottom));
+    max-width: 640px; margin-inline: auto;
+  }
+  h1 { font-size: 1.25rem; margin: 0 0 2px; }
+  .meta { color: var(--muted); font-size: .875rem; margin: 0; }
+  .banner {
+    background: var(--warn-bg); color: var(--warn-text); border-radius: 10px;
+    padding: 12px 14px; margin: 14px 0 0; font-weight: 600;
+  }
+  .range { display: flex; gap: 8px; margin: 16px 0 12px; }
+  .range button {
+    flex: 1; padding: 10px 0; border-radius: 10px; border: 1px solid var(--border);
+    background: var(--surface); color: var(--text); font: inherit; font-size: .9rem;
+  }
+  .range button[aria-pressed="true"] { background: var(--text); color: var(--bg); border-color: var(--text); }
+  .range button:focus-visible, a:focus-visible, summary:focus-visible { outline: 3px solid var(--line); outline-offset: 2px; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 14px 14px 10px; margin-bottom: 12px; }
+  .card header { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+  .card h2 { font-size: 1.05rem; margin: 0; }
+  .trend { font-weight: 700; font-size: .95rem; }
+  .trend.rising { color: var(--up); } .trend.falling { color: var(--down); } .trend.steady { color: var(--flat); }
+  .level { font-size: 2.75rem; font-weight: 700; margin: 4px 0 0; font-variant-numeric: tabular-nums; line-height: 1.1; }
+  .level small { font-size: 1.1rem; font-weight: 500; color: var(--muted); }
+  .delta { margin: 2px 0 8px; color: var(--muted); font-size: .9rem; font-variant-numeric: tabular-nums; }
+  svg { width: 100%; height: auto; display: block; }
+  svg text { fill: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums; }
+  .grid { stroke: var(--border); stroke-width: 1; }
+  .series { fill: none; stroke: var(--line); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+  .dot { fill: var(--line); }
+  .small { font-size: .85rem; color: var(--muted); }
+  details { margin-top: 6px; } summary { cursor: pointer; color: var(--muted); font-size: .85rem; }
+  details p { font-size: .8rem; color: var(--muted); word-break: break-word; margin: 6px 0 2px; }
+  footer { margin-top: 18px; font-size: .875rem; }
+  footer a { color: var(--line); }
+</style>
+</head>
+<body>
+  <h1>Serchio – provincia di Pisa</h1>
+  <p class="meta" id="meta">Caricamento…</p>
+  <div class="banner" id="banner" hidden></div>
+
+  <div class="range" role="group" aria-label="Intervallo del grafico">
+    <button data-h="6" aria-pressed="true">6 ore</button>
+    <button data-h="24" aria-pressed="false">24 ore</button>
+    <button data-h="72" aria-pressed="false">3 giorni</button>
+  </div>
+
+  <main id="cards"></main>
+
+  <footer>
+    <a href="https://www.cfr.toscana.it/monitoraggio/stazioni.php?type=idro">Sito ufficiale del Centro Funzionale</a>
+    <p class="small">I dati vengono controllati ogni 15 minuti circa e possono arrivare con qualche minuto di ritardo. In caso di pericolo segui le indicazioni di Comune e Protezione Civile, emergenze: 112.</p>
+  </footer>
+
+<script>
+const nf = new Intl.NumberFormat("it-IT", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const nfs = new Intl.NumberFormat("it-IT", { minimumFractionDigits: 2, maximumFractionDigits: 2, signDisplay: "always" });
+const tf = new Intl.DateTimeFormat("it-IT", { hour: "2-digit", minute: "2-digit" });
+const TREND = { rising: "▲ in salita", falling: "▼ in calo", steady: "■ stabile" };
+let RANGE = 6, cache = null;
+
+const $ = (s) => document.querySelector(s);
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+async function getJson(path) {
+  const r = await fetch(path + "?t=" + Date.now(), { cache: "no-store" });
+  if (!r.ok) throw new Error(path + " " + r.status);
+  return r.json();
+}
+
+async function refresh() {
+  try {
+    const [latest, history] = await Promise.all([getJson("data/latest.json"), getJson("data/history.json")]);
+    cache = { latest, history };
+    render();
+  } catch (e) {
+    $("#meta").textContent = "";
+    const b = $("#banner");
+    b.textContent = "Dati non ancora disponibili. Se hai appena creato il progetto, avvia il controllo da GitHub, scheda Actions.";
+    b.hidden = false;
+  }
+}
+
+function chart(id, tMax) {
+  const from = tMax - RANGE * 3600e3;
+  const pts = cache.history
+    .map((h) => ({ t: new Date(h.t).getTime(), v: h.v[id] }))
+    .filter((p) => p.v != null && p.t >= from);
+  if (pts.length < 2) return '<p class="small">Il grafico compare dopo due letture.</p>';
+  const W = 320, H = 120, pl = 36, pr = 8, pt = 8, pb = 18;
+  let min = Math.min(...pts.map((p) => p.v)), max = Math.max(...pts.map((p) => p.v));
+  if (max - min < 0.2) { const c = (max + min) / 2; min = c - 0.1; max = c + 0.1; }
+  const x = (t) => pl + ((t - from) / (tMax - from)) * (W - pl - pr);
+  const y = (v) => pt + ((max - v) / (max - min)) * (H - pt - pb);
+  const d = pts.map((p, i) => (i ? "L" : "M") + x(p.t).toFixed(1) + " " + y(p.v).toFixed(1)).join(" ");
+  const last = pts[pts.length - 1];
+  return `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Andamento del livello, da ${nf.format(pts[0].v)} a ${nf.format(last.v)} metri">
+    <line class="grid" x1="${pl}" x2="${W - pr}" y1="${y(max)}" y2="${y(max)}"/>
+    <line class="grid" x1="${pl}" x2="${W - pr}" y1="${y(min)}" y2="${y(min)}"/>
+    <text x="${pl - 4}" y="${y(max) + 3}" text-anchor="end">${nf.format(max)}</text>
+    <text x="${pl - 4}" y="${y(min) + 3}" text-anchor="end">${nf.format(min)}</text>
+    <text x="${pl}" y="${H - 4}">${tf.format(new Date(from))}</text>
+    <text x="${W - pr}" y="${H - 4}" text-anchor="end">${tf.format(new Date(tMax))}</text>
+    <path class="series" d="${d}"/>
+    <circle class="dot" cx="${x(last.t).toFixed(1)}" cy="${y(last.v).toFixed(1)}" r="3.5"/>
+  </svg>`;
+}
+
+function render() {
+  const { latest, history } = cache;
+  const updated = latest.updated ? new Date(latest.updated) : null;
+  const checked = latest.checked ? new Date(latest.checked) : null;
+  const ageMin = updated ? (Date.now() - updated.getTime()) / 60000 : Infinity;
+
+  $("#meta").textContent = updated
+    ? `Dati del CFR delle ${tf.format(updated)}, controllati alle ${checked ? tf.format(checked) : "–"}`
+    : "";
+
+  const b = $("#banner");
+  if (!latest.ok) {
+    b.textContent = "L’ultimo controllo non è riuscito. Guarda il sito ufficiale del CFR.";
+    b.hidden = false;
+  } else if (ageMin > 45) {
+    b.textContent = `Dati fermi da ${Math.round(ageMin)} minuti. Guarda il sito ufficiale del CFR.`;
+    b.hidden = false;
+  } else {
+    b.hidden = true;
+  }
+
+  const tMax = updated ? updated.getTime() : Date.now();
+  const prevTimes = history.map((h) => new Date(h.t).getTime());
+  const gap = prevTimes.length > 1 ? Math.round((prevTimes.at(-1) - prevTimes.at(-2)) / 60000) : null;
+
+  $("#cards").innerHTML = (latest.stations || []).map((s) => `
+    <article class="card">
+      <header>
+        <h2>${esc(s.name)}</h2>
+        <span class="trend ${esc(s.trend)}">${TREND[s.trend] || ""}</span>
+      </header>
+      <p class="level">${nf.format(s.level)} <small>m</small></p>
+      <p class="delta">${s.delta == null ? "Prima lettura" : `${nfs.format(s.delta)} m rispetto alla lettura precedente${gap ? ` (${gap} min prima)` : ""}`}</p>
+      ${chart(s.id, tMax)}
+      <details><summary>Riga letta dal CFR</summary><p>${esc(s.raw)}</p></details>
+    </article>`).join("");
+}
+
+document.querySelectorAll(".range button").forEach((btn) =>
+  btn.addEventListener("click", () => {
+    RANGE = Number(btn.dataset.h);
+    document.querySelectorAll(".range button").forEach((b) => b.setAttribute("aria-pressed", String(b === btn)));
+    if (cache) render();
+  })
+);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
+setInterval(refresh, 60000);
+refresh();
+</script>
+</body>
+</html>
