@@ -5,24 +5,31 @@ Come funziona
   Lo script gira ogni pochi minuti (vedi serchio.yml). La pagina del CFR crea
   la tabella con JavaScript, quindi viene aperta con un browser vero
   (Playwright) e si legge la riga di ogni stazione. Ogni nuova lettura (il CFR
-  ne pubblica una ogni 15 minuti circa) viene salvata in data/history.json.
-  Un controllo senza dati nuovi non salva e non notifica niente.
+  ne pubblica una ogni pochi minuti, di recente circa ogni 5) viene salvata in
+  data/history.json. Un controllo senza dati nuovi non salva e non notifica.
 
 Quando arrivano le notifiche di andamento
-  Solo quando il livello è "in zona": arriva a 0,5 m sotto la prima soglia (a
-  Vecchiano 7,00 m, con la prima soglia a 7,50 m) oppure al valore
+  Solo quando il livello è "in zona": arriva a 0,5 m sotto il 1° livello di
+  allerta (a Vecchiano 7,00 m, con il 1° livello a 7,50 m) oppure al valore
   "notifica_da" indicato in stations.json. Sotto quel livello i dati vengono
   registrati ma non arriva niente, anche se il livello sale o scende.
   In zona (e nella lettura in cui ne esce) valgono queste regole, per ogni
   idrometro:
-    - livello in salita              -> una notifica a ogni nuova lettura
-    - prima lettura in discesa       -> una notifica
+    - livello in salita              -> la prima notifica subito, poi una ogni
+                                        15 minuti finché continua a salire
+    - supera il 1° o il 2° livello di allerta -> notifica urgente subito,
+                                        senza aspettare i 15 minuti
+    - prima lettura in discesa       -> notifica subito, anche se l'ultima
+                                        notifica è di pochi minuti prima
     - discesa che continua           -> nessuna notifica
-    - torna a salire dopo un calo    -> si ricomincia a notificare
-    - salita che si ferma            -> una notifica ("livello stabile")
-    - supera la prima o la seconda soglia -> notifica urgente
-  Sopra la prima soglia le notifiche hanno priorità alta. Sopra la seconda,
-  salita e livello stabile hanno priorità massima.
+    - torna a salire dopo un calo    -> notifica subito, poi di nuovo una ogni
+                                        15 minuti
+    - salita che si ferma            -> una notifica ("livello stabile") dopo
+                                        3 letture di fila senza salita
+  Sopra il 1° livello di allerta le notifiche hanno priorità alta. Sopra il
+  2°, salita e livello stabile hanno priorità massima.
+  (A Vecchiano: 1° livello 7,50 m, 2° livello 9,00 m, in metri sullo zero
+  idrometrico, come nel sito del CFR.)
 
 Notifiche che arrivano sempre, anche fuori zona
     - al primo avvio: "monitoraggio attivo", con icona e priorità secondo il
@@ -46,8 +53,10 @@ URL = "https://www.cfr.toscana.it/monitoraggio/stazioni.php?type=idro"
 UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
       "Chrome/124.0 Safari/537.36")
 
-EPS = 0.02          # metri: variazioni più piccole contano come "stabile"
-MAX_HISTORY = 600   # letture conservate (circa 6 giorni)
+EPS = 0.02            # metri: una lettura che cambia meno di così conta come "stabile"
+NOTIFY_EVERY_MIN = 15 # minuti tra due notifiche mentre il livello continua a salire
+FLAT_READINGS = 3     # letture di fila senza salita prima di dire "livello stabile"
+MAX_HISTORY = 900     # letture conservate (circa 3 giorni, con letture ogni 5 minuti)
 STALE_MIN = 60      # minuti senza nuovi dati prima di avvisare
 CET = timezone(timedelta(hours=1))  # il CFR pubblica in ora solare
 
@@ -192,14 +201,14 @@ def soglia_text(level, soglie):
         return ""
     s1, s2 = soglie
     if level >= s2:
-        return f"sopra la seconda soglia ({fm(s2)})"
+        return f"sopra il 2° livello di allerta ({fm(s2)} m)"
     if level >= s1:
-        return f"sopra la prima soglia ({fm(s1)}), alla seconda mancano {fm(s2 - level)} m"
-    return f"alla prima soglia ({fm(s1)}) mancano {fm(s1 - level)} m"
+        return f"sopra il 1° livello di allerta ({fm(s1)} m), al 2° mancano {fm(s2 - level)} m"
+    return f"al 1° livello di allerta ({fm(s1)} m) mancano {fm(s1 - level)} m"
 
 
 def severity(level, soglie):
-    """0 sotto la prima soglia, 1 tra le due, 2 sopra la seconda."""
+    """0 sotto il 1° livello di allerta, 1 tra i due, 2 sopra il 2°."""
     if len(soglie) != 2:
         return 0
     return 2 if level >= soglie[1] else 1 if level >= soglie[0] else 0
@@ -282,16 +291,32 @@ def process(body, html, rows, now):
     levels = state.setdefault("levels", {})
     trends = state.setdefault("trends", {})
 
+    notified = state.setdefault("notified", {})   # ultima notifica per idrometro
+    stamps = state.setdefault("stamps", {})       # orario dell'ultima lettura
+    flats = state.setdefault("flats", {})         # letture di fila senza salita
+
+    def minutes(later, earlier):
+        return round((later - earlier).total_seconds() / 60)
+
+    def span(d, mins):
+        return f"({fd(d)}" + (f" in {mins} min" if mins else "") + ")"
+
     events = []      # (tipo, testo)
     cards = []
     for s in stations:
         r = parsed.get(s["id"])
         if not r:
             continue
+        sid = s["id"]
         level = r["level"]
         sog = r["soglie"]
-        prev = levels.get(s["id"])
-        prev_trend = trends.get(s["id"], "steady")
+        st = r["stamp"] or stamp
+        prev = levels.get(sid)
+        prev_trend = trends.get(sid, "steady")
+        prev_st = datetime.fromisoformat(stamps[sid]) if sid in stamps else None
+        gap = minutes(st, prev_st) if prev_st else None
+        last = notified.get(sid)
+        last_st = datetime.fromisoformat(last["t"]) if last else None
         delta = None
         trend = prev_trend
         extra = soglia_text(level, sog)
@@ -305,30 +330,42 @@ def process(body, html, rows, now):
 
         if prev is not None:
             delta = round(level - prev, 3)
-            for i, name in enumerate(("prima", "seconda")):
+            for i, name in enumerate(("1°", "2°")):
                 if len(sog) == 2 and prev < sog[i] <= level:
-                    ev.append(("soglia", f"🚨 {s['name']}: superata la {name} soglia ({fm(sog[i])} m), ora {fm(level)} m"))
+                    ev.append(("soglia", f"🚨 {s['name']}: superato il {name} livello di allerta ({fm(sog[i])} m), ora {fm(level)} m"))
             if delta > EPS:
+                flats[sid] = 0
                 trend = "rising"
-                ev.append(("up", f"▲ {s['name']}: {fm(level)} m ({fd(delta)}){extra}"))
+                # subito se la salita è appena cominciata, poi ogni NOTIFY_EVERY_MIN
+                due = (prev_trend != "rising" or last_st is None
+                       or minutes(st, last_st) >= NOTIFY_EVERY_MIN - 1)
+                if due:
+                    d_ref, m_ref = delta, gap
+                    if prev_trend == "rising" and last_st and 0 < minutes(st, last_st) <= 60:
+                        d_ref, m_ref = round(level - last["level"], 3), minutes(st, last_st)
+                    ev.append(("up", f"▲ {s['name']}: {fm(level)} m {span(d_ref, m_ref)}{extra}"))
             elif delta < -EPS:
+                flats[sid] = 0
                 trend = "falling"
                 if prev_trend != "falling":
-                    ev.append(("down", f"▼ {s['name']}: {fm(level)} m ({fd(delta)}), primo calo{extra}"))
+                    ev.append(("down", f"▼ {s['name']}: {fm(level)} m {span(delta, gap)}, primo calo{extra}"))
             else:
-                if prev_trend == "rising":
+                flats[sid] = flats.get(sid, 0) + 1
+                if prev_trend == "rising" and flats[sid] >= FLAT_READINGS:
                     trend = "steady"
                     ev.append(("flat", f"■ {s['name']}: {fm(level)} m, livello stabile{extra}"))
 
-        if in_zone:
+        if in_zone and ev:
             events.extend(ev)
+            notified[sid] = {"t": st.isoformat(), "level": level}
 
-        levels[s["id"]] = level
-        trends[s["id"]] = trend
+        levels[sid] = level
+        trends[sid] = trend
+        stamps[sid] = st.isoformat()
         cards.append({
-            "id": s["id"], "name": s["name"], "level": level, "delta": delta, "trend": trend,
+            "id": sid, "name": s["name"], "level": level, "delta": delta, "trend": trend,
             "flow": r["flow"], "soglie": sog, "var": r["var"], "notifica_da": da,
-            "stamp": (r["stamp"] or stamp).isoformat(), "raw": r["raw"],
+            "stamp": st.isoformat(), "raw": r["raw"],
         })
 
     sev = max((severity(c["level"], c["soglie"]) for c in cards), default=0)
@@ -350,15 +387,15 @@ def process(body, html, rows, now):
     elif events:
         kinds = {k for k, _ in events}
         if "soglia" in kinds:
-            title, prio, tags = "🚨 Serchio: soglia superata", 5, ["rotating_light"]
+            title, prio, tags = "🚨 Serchio: livello di allerta superato", 5, ["rotating_light"]
         elif "up" in kinds:
             title, prio, tags = ("🚨 Serchio: livello in salita", 5, ["rotating_light"]) if sev == 2 \
                 else ("🔺 Serchio: livello in salita", 4, ["warning"])
         elif "down" in kinds:
-            title, prio, tags = ("🔻 Serchio: in calo, ancora sopra soglia", 4, ["warning"]) if sev >= 1 \
+            title, prio, tags = ("🔻 Serchio: in calo, ancora sopra il livello di allerta", 4, ["warning"]) if sev >= 1 \
                 else ("🔻 Serchio: livello in calo", 3, ["arrow_down"])
         else:
-            title, prio, tags = ("🚨 Serchio: livello stabile, sopra soglia", 5, ["rotating_light"]) if sev == 2 \
+            title, prio, tags = ("🚨 Serchio: livello stabile, sopra il livello di allerta", 5, ["rotating_light"]) if sev == 2 \
                 else ("Serchio: livello stabile", 4 if sev == 1 else 3, ["information_source"])
         send_ntfy(
             title,
