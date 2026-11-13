@@ -1,21 +1,25 @@
 name: Monitoraggio Serchio
 
+# Il lavoro resta acceso per circa 5 ore e 40 minuti e controlla il CFR ogni
+# 5 minuti. Prima di finire rilancia sé stesso. La pianificazione "cron" serve
+# solo da rete di sicurezza se la catena si interrompe.
 on:
   schedule:
-    - cron: "*/15 * * * *"
+    - cron: "7,37 * * * *"
   workflow_dispatch:
 
 permissions:
   contents: write
+  actions: write
 
 concurrency:
   group: serchio
   cancel-in-progress: false
 
 jobs:
-  check:
+  loop:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 355
     steps:
       - uses: actions/checkout@v4
 
@@ -28,16 +32,29 @@ jobs:
           pip install requests playwright
           playwright install --with-deps chromium
 
-      - name: Controlla i livelli
+      - name: Controlla i livelli ogni 5 minuti
         env:
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
           DASHBOARD_URL: ${{ vars.DASHBOARD_URL }}
-        run: python monitor.py
-
-      - name: Salva i dati
-        if: always()
         run: |
           git config user.name "serchio-bot"
           git config user.email "serchio-bot@users.noreply.github.com"
-          git add data
-          git diff --cached --quiet || (git commit -m "dati $(date -u +%H:%M)" && git push)
+          start=$(date +%s)
+          while true; do
+            git pull --rebase --autostash -q || true
+            python monitor.py || true
+            if ! git diff --quiet -- data/history.json data/state.json || [ -n "$(git ls-files --others --exclude-standard data)" ]; then
+              git add data
+              git commit -qm "dati $(date -u +%H:%M)" || true
+              git push -q || (git pull --rebase --autostash -q && git push -q) || true
+            fi
+            if [ $(( $(date +%s) - start )) -gt 20400 ]; then break; fi
+            sleep 300
+          done
+
+      - name: Rilancia la catena
+        if: success() || failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh workflow run serchio.yml
