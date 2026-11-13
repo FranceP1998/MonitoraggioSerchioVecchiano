@@ -1,3 +1,12 @@
 {
- "fail": 1
+ "fail": 0,
+ "missing_notified": "",
+ "stale_alerted": false,
+ "levels": {
+  "TOS02004365": 9.1
+ },
+ "trends": {
+  "TOS02004365": "steady"
+ },
+ "last_stamp": "2026-11-13T01:25:00+01:00"
 }

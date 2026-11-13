@@ -1,5 +1,27 @@
 {
- "ok": false,
- "checked": "2026-11-13T00:21:36.315627+00:00",
- "error": "lettura non riuscita"
+ "ok": true,
+ "updated": "2026-11-13T01:25:00+01:00",
+ "checked": "2026-11-13T00:35:08.254341+00:00",
+ "stations": [
+  {
+   "id": "TOS02004365",
+   "name": "Vecchiano",
+   "level": 9.1,
+   "delta": null,
+   "trend": "steady",
+   "flow": 1181.5,
+   "soglie": [
+    7.5,
+    9.0
+   ],
+   "var": {
+    "15m": -0.01,
+    "30m": 0.25,
+    "1h": 1.28
+   },
+   "stamp": "2026-11-13T01:25:00+01:00",
+   "raw": "TOS02004365 | Serchio | Vecchiano (GPRS) | PI | S3 | 9.00 | 7.50 | 9.10 | 1181.50 | -0.01 | 0.25 | 1.28 | 13/11 01.25"
+  }
+ ],
+ "missing": []
 }
