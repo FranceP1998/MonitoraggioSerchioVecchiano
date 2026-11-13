@@ -55,6 +55,7 @@
   .grid { stroke: var(--border); stroke-width: 1; }
   .series { fill: none; stroke: var(--line); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
   .dot { fill: var(--line); }
+  .thr { stroke: var(--up); stroke-width: 1; stroke-dasharray: 4 3; }
   .small { font-size: .85rem; color: var(--muted); }
   details { margin-top: 6px; } summary { cursor: pointer; color: var(--muted); font-size: .85rem; }
   details p { font-size: .8rem; color: var(--muted); word-break: break-word; margin: 6px 0 2px; }
@@ -109,7 +110,7 @@ async function refresh() {
   }
 }
 
-function chart(id, tMax) {
+function chart(id, tMax, soglie) {
   const from = tMax - RANGE * 3600e3;
   const pts = cache.history
     .map((h) => ({ t: new Date(h.t).getTime(), v: h.v[id] }))
@@ -117,6 +118,8 @@ function chart(id, tMax) {
   if (pts.length < 2) return '<p class="small">Il grafico compare dopo due letture.</p>';
   const W = 320, H = 120, pl = 36, pr = 8, pt = 8, pb = 18;
   let min = Math.min(...pts.map((p) => p.v)), max = Math.max(...pts.map((p) => p.v));
+  const near = (soglie || []).filter((s) => s >= min - 1.5 && s <= max + 1.5);
+  near.forEach((s) => { min = Math.min(min, s - 0.1); max = Math.max(max, s + 0.1); });
   if (max - min < 0.2) { const c = (max + min) / 2; min = c - 0.1; max = c + 0.1; }
   const x = (t) => pl + ((t - from) / (tMax - from)) * (W - pl - pr);
   const y = (v) => pt + ((max - v) / (max - min)) * (H - pt - pb);
@@ -129,9 +132,22 @@ function chart(id, tMax) {
     <text x="${pl - 4}" y="${y(min) + 3}" text-anchor="end">${nf.format(min)}</text>
     <text x="${pl}" y="${H - 4}">${tf.format(new Date(from))}</text>
     <text x="${W - pr}" y="${H - 4}" text-anchor="end">${tf.format(new Date(tMax))}</text>
+    ${near.map((s) => `<line class="thr" x1="${pl}" x2="${W - pr}" y1="${y(s)}" y2="${y(s)}"/><text x="${W - pr}" y="${y(s) - 3}" text-anchor="end">soglia ${nf.format(s)}</text>`).join("")}
     <path class="series" d="${d}"/>
     <circle class="dot" cx="${x(last.t).toFixed(1)}" cy="${y(last.v).toFixed(1)}" r="3.5"/>
   </svg>`;
+}
+
+function info(s) {
+  const parts = [];
+  if (s.soglie && s.soglie.length === 2) {
+    const [a, b] = s.soglie;
+    parts.push(s.level >= b ? `Sopra la seconda soglia (${nf.format(b)} m)`
+      : s.level >= a ? `Sopra la prima soglia (${nf.format(a)} m), alla seconda mancano ${nf.format(b - s.level)} m`
+      : `Alla prima soglia (${nf.format(a)} m) mancano ${nf.format(a - s.level)} m`);
+  }
+  if (s.flow != null) parts.push(`Portata ${nf.format(s.flow)} m³/s`);
+  return parts.length ? `<p class="delta">${parts.join(". ")}</p>` : "";
 }
 
 function render() {
@@ -167,7 +183,8 @@ function render() {
       </header>
       <p class="level">${nf.format(s.level)} <small>m</small></p>
       <p class="delta">${s.delta == null ? "Prima lettura" : `${nfs.format(s.delta)} m rispetto alla lettura precedente${gap ? ` (${gap} min prima)` : ""}`}</p>
-      ${chart(s.id, tMax)}
+      ${info(s)}
+      ${chart(s.id, tMax, s.soglie)}
       <details><summary>Riga letta dal CFR</summary><p>${esc(s.raw)}</p></details>
     </article>`).join("");
 }
