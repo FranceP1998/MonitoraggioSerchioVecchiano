@@ -6,19 +6,19 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="Serchio">
 <meta name="color-scheme" content="light dark">
-<title>Serchio – livelli</title>
+<title>Monitoraggio Serchio Vecchiano</title>
 <style>
   :root {
     --bg: #eef1f4; --surface: #ffffff; --text: #16202a; --muted: #5b6875;
     --line: #0b5cab; --up: #c62828; --down: #1b7f4b; --flat: #5b6875;
-    --border: #d5dbe1; --warn-bg: #fff1d6; --warn-text: #6b4200; --surface-2: #f1f4f7; --amber: #d98e04;
+    --border: #d5dbe1; --warn-bg: #fff1d6; --warn-text: #6b4200; --surface-2: #f1f4f7; --amber: #d98e04; --amber-text: #8a5a00;
     color-scheme: light dark;
   }
   @media (prefers-color-scheme: dark) {
     :root {
       --bg: #0f151b; --surface: #18212a; --text: #e8edf2; --muted: #93a1ae;
       --line: #6cb2ff; --up: #ff7a6b; --down: #4cc38a; --flat: #93a1ae;
-      --border: #2a3541; --warn-bg: #3a2b0c; --warn-text: #ffd48a; --surface-2: #1f2a35; --amber: #f0b44c;
+      --border: #2a3541; --warn-bg: #3a2b0c; --warn-text: #ffd48a; --surface-2: #1f2a35; --amber: #f0b44c; --amber-text: #f0b44c;
     }
   }
   * { box-sizing: border-box; }
@@ -55,7 +55,9 @@
   .grid { stroke: var(--border); stroke-width: 1; }
   .series { fill: none; stroke: var(--line); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
   .dot { fill: var(--line); }
-  .thr { stroke: var(--up); stroke-width: 1; stroke-dasharray: 4 3; }
+  .thr { stroke-width: 1.2; stroke-dasharray: 4 3; }
+  .thr.t1 { stroke: var(--amber); } .thr.t2 { stroke: var(--up); }
+  svg text.t1 { fill: var(--amber-text); font-weight: 600; } svg text.t2 { fill: var(--up); font-weight: 600; }
   .small { font-size: .85rem; color: var(--muted); }
   .hist-title { font-size: .95rem; margin: 14px 0 8px; }
   .table-wrap { max-height: 340px; overflow: auto; border: 1px solid var(--border); border-radius: 10px; -webkit-overflow-scrolling: touch; }
@@ -77,7 +79,7 @@
 </style>
 </head>
 <body>
-  <h1>Serchio – provincia di Pisa</h1>
+  <h1>Monitoraggio Serchio Vecchiano</h1>
   <p class="meta" id="meta">Caricamento…</p>
   <div class="banner" id="banner" hidden></div>
 
@@ -91,7 +93,7 @@
 
   <footer>
     <a href="https://www.cfr.toscana.it/monitoraggio/stazioni.php?type=idro">Sito ufficiale del Centro Funzionale</a>
-    <p class="small">I dati vengono controllati ogni 15 minuti circa e possono arrivare con qualche minuto di ritardo. In caso di pericolo segui le indicazioni di Comune e Protezione Civile, emergenze: 112.</p>
+    <p class="small">Livelli in metri sullo zero idrometrico (m s.z.i.), come sul sito del CFR. I dati vengono controllati ogni pochi minuti e possono arrivare con qualche minuto di ritardo. In caso di pericolo segui le indicazioni di Comune e Protezione Civile, emergenze: 112.</p>
   </footer>
 
 <script>
@@ -147,7 +149,7 @@ function chart(id, tMax, soglie) {
     <text x="${pl - 4}" y="${y(min) + 3}" text-anchor="end">${nf.format(min)}</text>
     <text x="${pl}" y="${H - 4}">${tf.format(new Date(from))}</text>
     <text x="${W - pr}" y="${H - 4}" text-anchor="end">${tf.format(new Date(tMax))}</text>
-    ${near.map((s) => `<line class="thr" x1="${pl}" x2="${W - pr}" y1="${y(s)}" y2="${y(s)}"/><text x="${W - pr}" y="${y(s) - 3}" text-anchor="end">soglia ${nf.format(s)}</text>`).join("")}
+    ${near.map((s) => { const k = s === soglie[0] ? "t1" : "t2"; return `<line class="thr ${k}" x1="${pl}" x2="${W - pr}" y1="${y(s)}" y2="${y(s)}"/><text class="${k}" x="${W - pr}" y="${y(s) - 3}" text-anchor="end">${k === "t1" ? "1°" : "2°"} livello di allerta · ${nf.format(s)} m s.z.i.</text>`; }).join("")}
     <path class="series" d="${d}"/>
     <circle class="dot" cx="${x(last.t).toFixed(1)}" cy="${y(last.v).toFixed(1)}" r="3.5"/>
   </svg>`;
@@ -181,16 +183,16 @@ function histTable(s, tMax) {
       <table class="hist"><thead><tr><th>Ora</th><th>Livello (m)</th><th>Variazione</th><th>Portata (m³/s)</th></tr></thead>
       <tbody>${body}</tbody></table>
     </div>
-    <p class="small">Barra gialla: sopra la prima soglia. Barra rossa: sopra la seconda.</p>`;
+    <p class="small">Barra gialla: sopra il 1° livello di allerta. Barra rossa: sopra il 2°.</p>`;
 }
 
 function info(s) {
   const parts = [];
   if (s.soglie && s.soglie.length === 2) {
     const [a, b] = s.soglie;
-    parts.push(s.level >= b ? `Sopra la seconda soglia (${nf.format(b)} m)`
-      : s.level >= a ? `Sopra la prima soglia (${nf.format(a)} m), alla seconda mancano ${nf.format(b - s.level)} m`
-      : `Alla prima soglia (${nf.format(a)} m) mancano ${nf.format(a - s.level)} m`);
+    parts.push(s.level >= b ? `Sopra il 2° livello di allerta (${nf.format(b)} m)`
+      : s.level >= a ? `Sopra il 1° livello di allerta (${nf.format(a)} m), al 2° mancano ${nf.format(b - s.level)} m`
+      : `Al 1° livello di allerta (${nf.format(a)} m) mancano ${nf.format(a - s.level)} m`);
   }
   if (s.flow != null) parts.push(`Portata ${nf1.format(s.flow)} m³/s`);
   if (s.notifica_da != null) parts.push(`Avvisi di andamento da ${nf.format(s.notifica_da)} m`);
