@@ -15,7 +15,7 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
@@ -23,7 +23,10 @@ jobs:
         with:
           python-version: "3.12"
 
-      - run: pip install requests beautifulsoup4
+      - name: Installa il browser
+        run: |
+          pip install requests playwright
+          playwright install --with-deps chromium
 
       - name: Controlla i livelli
         env:
