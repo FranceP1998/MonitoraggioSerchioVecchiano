@@ -1,18 +1,34 @@
 #!/usr/bin/env python3
 """Monitoraggio idrometri del Serchio (CFR Toscana) con notifiche ntfy.
 
-La pagina del CFR costruisce la tabella con JavaScript, quindi viene aperta
-con un browser vero (Playwright) e si legge la riga di ogni stazione.
+Come funziona
+  Lo script gira ogni pochi minuti (vedi serchio.yml). La pagina del CFR crea
+  la tabella con JavaScript, quindi viene aperta con un browser vero
+  (Playwright) e si legge la riga di ogni stazione. Ogni nuova lettura (il CFR
+  ne pubblica una ogni 15 minuti circa) viene salvata in data/history.json.
+  Un controllo senza dati nuovi non salva e non notifica niente.
 
-Regole di notifica (per ogni idrometro, ad ogni nuova lettura del CFR):
-  - livello in salita            -> notifica a ogni lettura (circa ogni 15 minuti)
-  - prima lettura in discesa     -> una notifica
-  - discesa che continua         -> nessuna notifica
-  - livello che torna a salire   -> si ricomincia a notificare
-  - salita che si ferma          -> una notifica ("livello stabile")
-  - superamento di una soglia    -> notifica urgente
-Se i dati non si leggono o restano fermi, arriva un avviso: il silenzio non
-deve mai voler dire "tutto bene" per errore.
+Quando arrivano le notifiche di andamento
+  Solo quando il livello è "in zona": arriva a 0,5 m sotto la prima soglia (a
+  Vecchiano 7,00 m, con la prima soglia a 7,50 m) oppure al valore
+  "notifica_da" indicato in stations.json. Sotto quel livello i dati vengono
+  registrati ma non arriva niente, anche se il livello sale o scende.
+  In zona (e nella lettura in cui ne esce) valgono queste regole, per ogni
+  idrometro:
+    - livello in salita              -> una notifica a ogni nuova lettura
+    - prima lettura in discesa       -> una notifica
+    - discesa che continua           -> nessuna notifica
+    - torna a salire dopo un calo    -> si ricomincia a notificare
+    - salita che si ferma            -> una notifica ("livello stabile")
+    - supera la prima o la seconda soglia -> notifica urgente
+  Sopra la prima soglia le notifiche hanno priorità alta. Sopra la seconda,
+  salita e livello stabile hanno priorità massima.
+
+Notifiche che arrivano sempre, anche fuori zona
+    - al primo avvio: "monitoraggio attivo", con icona e priorità secondo il
+      livello del momento
+    - dati non leggibili, idrometro mancante o dati fermi da più di un'ora:
+      il silenzio non deve mai voler dire "tutto bene" per errore
 """
 import json
 import os
@@ -280,29 +296,38 @@ def process(body, html, rows, now):
         trend = prev_trend
         extra = soglia_text(level, sog)
         extra = f" – {extra}" if extra else ""
+        da = s.get("notifica_da")
+        if da is None and len(sog) == 2:
+            da = round(sog[0] - 0.5, 2)
+        # in zona: livello arrivato a "da", o appena uscito da quella zona
+        in_zone = da is None or level >= da or (prev is not None and prev >= da)
+        ev = []
 
         if prev is not None:
             delta = round(level - prev, 3)
             for i, name in enumerate(("prima", "seconda")):
                 if len(sog) == 2 and prev < sog[i] <= level:
-                    events.append(("soglia", f"🚨 {s['name']}: superata la {name} soglia ({fm(sog[i])} m), ora {fm(level)} m"))
+                    ev.append(("soglia", f"🚨 {s['name']}: superata la {name} soglia ({fm(sog[i])} m), ora {fm(level)} m"))
             if delta > EPS:
                 trend = "rising"
-                events.append(("up", f"▲ {s['name']}: {fm(level)} m ({fd(delta)}){extra}"))
+                ev.append(("up", f"▲ {s['name']}: {fm(level)} m ({fd(delta)}){extra}"))
             elif delta < -EPS:
                 trend = "falling"
                 if prev_trend != "falling":
-                    events.append(("down", f"▼ {s['name']}: {fm(level)} m ({fd(delta)}), primo calo{extra}"))
+                    ev.append(("down", f"▼ {s['name']}: {fm(level)} m ({fd(delta)}), primo calo{extra}"))
             else:
                 if prev_trend == "rising":
                     trend = "steady"
-                    events.append(("flat", f"■ {s['name']}: {fm(level)} m, livello stabile{extra}"))
+                    ev.append(("flat", f"■ {s['name']}: {fm(level)} m, livello stabile{extra}"))
+
+        if in_zone:
+            events.extend(ev)
 
         levels[s["id"]] = level
         trends[s["id"]] = trend
         cards.append({
             "id": s["id"], "name": s["name"], "level": level, "delta": delta, "trend": trend,
-            "flow": r["flow"], "soglie": sog, "var": r["var"],
+            "flow": r["flow"], "soglie": sog, "var": r["var"], "notifica_da": da,
             "stamp": (r["stamp"] or stamp).isoformat(), "raw": r["raw"],
         })
 
@@ -314,6 +339,8 @@ def process(body, html, rows, now):
         for c in cards:
             t = soglia_text(c["level"], c["soglie"])
             lines.append(f"{c['name']}: {fm(c['level'])} m" + (f" ({t})" if t else ""))
+            if c["notifica_da"] is not None:
+                lines.append(f"Avvisi di andamento da {fm(c['notifica_da'])} m")
         send_ntfy(
             f"{icon} Serchio: monitoraggio attivo",
             f"Dati delle {stamp:%H:%M}\n" + "\n".join(lines),
@@ -341,7 +368,8 @@ def process(body, html, rows, now):
         )
 
     state["last_stamp"] = stamp_iso
-    history.append({"t": stamp_iso, "v": {c["id"]: c["level"] for c in cards}})
+    history.append({"t": stamp_iso, "v": {c["id"]: c["level"] for c in cards},
+                    "f": {c["id"]: c["flow"] for c in cards}})
     history = history[-MAX_HISTORY:]
 
     save_json(DATA / "history.json", history)
