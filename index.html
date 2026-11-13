@@ -11,14 +11,14 @@
   :root {
     --bg: #eef1f4; --surface: #ffffff; --text: #16202a; --muted: #5b6875;
     --line: #0b5cab; --up: #c62828; --down: #1b7f4b; --flat: #5b6875;
-    --border: #d5dbe1; --warn-bg: #fff1d6; --warn-text: #6b4200;
+    --border: #d5dbe1; --warn-bg: #fff1d6; --warn-text: #6b4200; --surface-2: #f1f4f7; --amber: #d98e04;
     color-scheme: light dark;
   }
   @media (prefers-color-scheme: dark) {
     :root {
       --bg: #0f151b; --surface: #18212a; --text: #e8edf2; --muted: #93a1ae;
       --line: #6cb2ff; --up: #ff7a6b; --down: #4cc38a; --flat: #93a1ae;
-      --border: #2a3541; --warn-bg: #3a2b0c; --warn-text: #ffd48a;
+      --border: #2a3541; --warn-bg: #3a2b0c; --warn-text: #ffd48a; --surface-2: #1f2a35; --amber: #f0b44c;
     }
   }
   * { box-sizing: border-box; }
@@ -57,6 +57,19 @@
   .dot { fill: var(--line); }
   .thr { stroke: var(--up); stroke-width: 1; stroke-dasharray: 4 3; }
   .small { font-size: .85rem; color: var(--muted); }
+  .hist-title { font-size: .95rem; margin: 14px 0 8px; }
+  .table-wrap { max-height: 340px; overflow: auto; border: 1px solid var(--border); border-radius: 10px; -webkit-overflow-scrolling: touch; }
+  table.hist { width: 100%; border-collapse: separate; border-spacing: 0; font-variant-numeric: tabular-nums; font-size: .93rem; }
+  .hist th { position: sticky; top: 0; z-index: 1; background: var(--surface-2); color: var(--muted); font-size: .75rem; font-weight: 600; text-align: right; padding: 9px 10px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  .hist td { padding: 9px 10px; text-align: right; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  .hist th:first-child, .hist td:first-child { text-align: left; }
+  .hist tbody tr:last-child td { border-bottom: 0; }
+  .hist tr.day td { background: var(--surface-2); color: var(--muted); font-size: .75rem; font-weight: 600; text-align: left; text-transform: capitalize; padding: 6px 10px; }
+  .hist tr.r1 td:first-child { box-shadow: inset 4px 0 0 var(--amber); }
+  .hist tr.r2 td:first-child { box-shadow: inset 4px 0 0 var(--up); }
+  .hist td.up { color: var(--up); } .hist td.down { color: var(--down); } .hist td.flat { color: var(--muted); }
+  .hist td strong { font-weight: 700; }
+  .table-wrap:focus-visible { outline: 3px solid var(--line); outline-offset: 2px; }
   details { margin-top: 6px; } summary { cursor: pointer; color: var(--muted); font-size: .85rem; }
   details p { font-size: .8rem; color: var(--muted); word-break: break-word; margin: 6px 0 2px; }
   footer { margin-top: 18px; font-size: .875rem; }
@@ -68,9 +81,9 @@
   <p class="meta" id="meta">Caricamento…</p>
   <div class="banner" id="banner" hidden></div>
 
-  <div class="range" role="group" aria-label="Intervallo del grafico">
-    <button data-h="6" aria-pressed="true">6 ore</button>
-    <button data-h="24" aria-pressed="false">24 ore</button>
+  <div class="range" role="group" aria-label="Intervallo di grafico e storico">
+    <button data-h="6" aria-pressed="false">6 ore</button>
+    <button data-h="24" aria-pressed="true">24 ore</button>
     <button data-h="72" aria-pressed="false">3 giorni</button>
   </div>
 
@@ -85,8 +98,10 @@
 const nf = new Intl.NumberFormat("it-IT", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const nfs = new Intl.NumberFormat("it-IT", { minimumFractionDigits: 2, maximumFractionDigits: 2, signDisplay: "always" });
 const tf = new Intl.DateTimeFormat("it-IT", { hour: "2-digit", minute: "2-digit" });
+const dayf = new Intl.DateTimeFormat("it-IT", { weekday: "long", day: "numeric", month: "long" });
+const nf1 = new Intl.NumberFormat("it-IT", { maximumFractionDigits: 1 });
 const TREND = { rising: "▲ in salita", falling: "▼ in calo", steady: "■ stabile" };
-let RANGE = 6, cache = null;
+let RANGE = 24, cache = null;
 
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
@@ -138,6 +153,37 @@ function chart(id, tMax, soglie) {
   </svg>`;
 }
 
+function histTable(s, tMax) {
+  const from = tMax - RANGE * 3600e3;
+  const all = cache.history
+    .map((h) => ({ t: new Date(h.t), v: h.v[s.id], f: h.f ? h.f[s.id] : null }))
+    .filter((p) => p.v != null);
+  const rows = all
+    .map((p, i) => ({ ...p, d: i ? Math.round((p.v - all[i - 1].v) * 1000) / 1000 : null }))
+    .filter((p) => p.t.getTime() >= from)
+    .reverse();
+  if (!rows.length) return "";
+  const [a, b] = s.soglie && s.soglie.length === 2 ? s.soglie : [Infinity, Infinity];
+  let body = "", lastDay = "";
+  for (const r of rows) {
+    const day = dayf.format(r.t);
+    if (day !== lastDay) { body += `<tr class="day"><td colspan="4">${esc(day)}</td></tr>`; lastDay = day; }
+    const cls = r.v >= b ? "r2" : r.v >= a ? "r1" : "";
+    const up = r.d != null && r.d > 0.02, down = r.d != null && r.d < -0.02;
+    const dc = r.d == null ? "" : up ? "up" : down ? "down" : "flat";
+    const sign = up ? "▲" : down ? "▼" : "■";
+    body += `<tr class="${cls}"><td>${tf.format(r.t)}</td><td><strong>${nf.format(r.v)}</strong></td>` +
+      `<td class="${dc}">${r.d == null ? "–" : `${sign} ${nfs.format(r.d)}`}</td>` +
+      `<td>${r.f != null ? nf1.format(r.f) : "–"}</td></tr>`;
+  }
+  return `<h3 class="hist-title">Storico delle letture</h3>
+    <div class="table-wrap" tabindex="0" role="region" aria-label="Storico delle letture di ${esc(s.name)}">
+      <table class="hist"><thead><tr><th>Ora</th><th>Livello (m)</th><th>Variazione</th><th>Portata (m³/s)</th></tr></thead>
+      <tbody>${body}</tbody></table>
+    </div>
+    <p class="small">Barra gialla: sopra la prima soglia. Barra rossa: sopra la seconda.</p>`;
+}
+
 function info(s) {
   const parts = [];
   if (s.soglie && s.soglie.length === 2) {
@@ -146,7 +192,8 @@ function info(s) {
       : s.level >= a ? `Sopra la prima soglia (${nf.format(a)} m), alla seconda mancano ${nf.format(b - s.level)} m`
       : `Alla prima soglia (${nf.format(a)} m) mancano ${nf.format(a - s.level)} m`);
   }
-  if (s.flow != null) parts.push(`Portata ${nf.format(s.flow)} m³/s`);
+  if (s.flow != null) parts.push(`Portata ${nf1.format(s.flow)} m³/s`);
+  if (s.notifica_da != null) parts.push(`Avvisi di andamento da ${nf.format(s.notifica_da)} m`);
   return parts.length ? `<p class="delta">${parts.join(". ")}</p>` : "";
 }
 
@@ -185,6 +232,7 @@ function render() {
       <p class="delta">${s.delta == null ? "Prima lettura" : `${nfs.format(s.delta)} m rispetto alla lettura precedente${gap ? ` (${gap} min prima)` : ""}`}</p>
       ${info(s)}
       ${chart(s.id, tMax, s.soglie)}
+      ${histTable(s, tMax)}
       <details><summary>Riga letta dal CFR</summary><p>${esc(s.raw)}</p></details>
     </article>`).join("");
 }
