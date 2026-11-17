@@ -156,7 +156,8 @@ def page_stamp(body):
 
 def parse_station(cells, ref_stamp):
     """Riga: codice, fiume, stazione, prov, zona, soglia2, soglia1, livello,
-    portata, variazioni 15'/30'/1h, data e ora dell'ultimo dato."""
+    portata, variazioni 15'/30'/1h, data e ora dell'ultimo dato.
+    Con il livello basso il CFR non calcola la portata e quella cella manca."""
     cells = [re.sub(r"\s+", " ", c).strip() for c in cells]
     cells = [c for c in cells if c]
     zone = None
@@ -184,9 +185,15 @@ def parse_station(cells, ref_stamp):
             vals.append(float(tok.replace(",", ".")))
         elif tok == "-":
             vals.append(None)
-    if len(vals) != 7 or vals[2] is None:
+    if len(vals) == 7:
+        s2, s1, level, flow, d15, d30, d60 = vals
+    elif len(vals) == 6:
+        s2, s1, level, d15, d30, d60 = vals
+        flow = None
+    else:
         return None
-    s2, s1, level, flow, d15, d30, d60 = vals
+    if level is None:
+        return None
     return {
         "level": level, "flow": flow, "soglie": sorted(x for x in (s1, s2) if x is not None),
         "var": {"15m": d15, "30m": d30, "1h": d60}, "stamp": stamp,
@@ -245,8 +252,10 @@ def process(body, html, rows, now):
         DATA.mkdir(exist_ok=True)
         (DATA / "debug.txt").write_text(body[:30000], encoding="utf-8")
         (DATA / "debug.html").write_text(html[:200000], encoding="utf-8")
-        register_failure(state, "Non trovo i livelli nella pagina del CFR.")
-        latest.update({"ok": False, "checked": now.isoformat(), "error": "lettura non riuscita"})
+        seen = " | ".join(next(iter(rows.values()), []))[:200]
+        register_failure(state, "Non riesco a leggere la riga della stazione. "
+                         + (f"Riga trovata: {seen}." if seen else "La riga non c'è nella pagina."))
+        latest.update({"ok": False, "checked": now.isoformat(), "error": "lettura non riuscita", "riga": seen})
         save_json(DATA / "latest.json", latest)
         save_json(DATA / "state.json", state)
         return
