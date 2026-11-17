@@ -1,5 +1,5 @@
 {
- "fail": 0,
+ "fail": 1,
  "missing_notified": "",
  "stale_alerted": false,
  "levels": {
