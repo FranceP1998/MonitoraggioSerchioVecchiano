@@ -1,7 +1,7 @@
 {
- "ok": true,
+ "ok": false,
  "updated": "2026-11-17T01:55:00+01:00",
- "checked": "2026-11-17T01:03:41.773132+00:00",
+ "checked": "2026-11-17T01:08:47.998003+00:00",
  "stations": [
   {
    "id": "TOS02004365",
@@ -24,5 +24,6 @@
    "raw": "TOS02004365 | Serchio | Vecchiano (GPRS) | PI | S3 | 9.00 | 7.50 | 2.23 | 142.30 | -0.02 | 0.01 | -0.06 | 17/11 01.55"
   }
  ],
- "missing": []
+ "missing": [],
+ "error": "lettura non riuscita"
 }
