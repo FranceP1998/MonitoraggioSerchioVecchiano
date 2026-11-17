@@ -1,29 +1,28 @@
 {
- "ok": false,
- "updated": "2026-11-17T02:20:00+01:00",
- "checked": "2026-11-17T06:24:11.017197+00:00",
+ "ok": true,
+ "updated": "2026-11-17T07:20:00+01:00",
+ "checked": "2026-11-17T06:29:17.683263+00:00",
  "stations": [
   {
    "id": "TOS02004365",
    "name": "Vecchiano",
-   "level": 2.23,
-   "delta": 0.0,
+   "level": 2.16,
+   "delta": -0.07,
    "trend": "falling",
-   "flow": 142.3,
+   "flow": null,
    "soglie": [
     7.5,
     9.0
    ],
    "var": {
     "15m": -0.02,
-    "30m": 0.0,
-    "1h": -0.06
+    "30m": -0.04,
+    "1h": -0.09
    },
    "notifica_da": 7.0,
-   "stamp": "2026-11-17T02:20:00+01:00",
-   "raw": "TOS02004365 | Serchio | Vecchiano (GPRS) | PI | S3 | 9.00 | 7.50 | 2.23 | 142.30 | -0.02 | 0.00 | -0.06 | 17/11 02.20"
+   "stamp": "2026-11-17T07:20:00+01:00",
+   "raw": "TOS02004365 | Serchio | Vecchiano (GPRS) | PI | S3 | 9.00 | 7.50 | 2.16 | -0.02 | -0.04 | -0.09 | 17/11 07.20"
   }
  ],
- "missing": [],
- "error": "lettura non riuscita"
+ "missing": []
 }
