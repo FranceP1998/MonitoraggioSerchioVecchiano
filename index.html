@@ -41,6 +41,14 @@
     background: var(--surface); color: var(--text); font: inherit; font-size: .9rem;
   }
   .range button[aria-pressed="true"] { background: var(--text); color: var(--bg); border-color: var(--text); }
+  .custom { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 12px; margin: -4px 0 12px; display: grid; gap: 10px; }
+  .custom[hidden] { display: none; }
+  .custom label { display: grid; gap: 4px; font-size: .8rem; color: var(--muted); }
+  .custom input { font: inherit; font-size: 1rem; color: var(--text); background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 9px 10px; min-width: 0; width: 100%; }
+  .custom .go { padding: 11px 0; border-radius: 10px; border: 0; background: var(--text); color: var(--bg); font: inherit; font-weight: 600; }
+  .custom .small { margin: 0; }
+  .custom .err { color: var(--up); font-weight: 600; }
+  .custom input:focus-visible, .custom .go:focus-visible { outline: 3px solid var(--line); outline-offset: 2px; }
   .range button:focus-visible, a:focus-visible, summary:focus-visible { outline: 3px solid var(--line); outline-offset: 2px; }
   .card { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 14px 14px 10px; margin-bottom: 12px; }
   .card header { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
@@ -87,7 +95,14 @@
     <button data-h="6" aria-pressed="false">6 ore</button>
     <button data-h="24" aria-pressed="true">24 ore</button>
     <button data-h="72" aria-pressed="false">3 giorni</button>
+    <button id="customBtn" aria-pressed="false" aria-expanded="false" aria-controls="custom">Periodo</button>
   </div>
+  <form class="custom" id="custom" hidden>
+    <label>Dal <input type="datetime-local" id="from" required></label>
+    <label>Al <input type="datetime-local" id="to" required></label>
+    <button class="go" type="submit">Mostra periodo</button>
+    <p class="small" id="customNote"></p>
+  </form>
 
   <main id="cards"></main>
 
@@ -103,7 +118,12 @@ const tf = new Intl.DateTimeFormat("it-IT", { hour: "2-digit", minute: "2-digit"
 const dayf = new Intl.DateTimeFormat("it-IT", { weekday: "long", day: "numeric", month: "long" });
 const nf1 = new Intl.NumberFormat("it-IT", { maximumFractionDigits: 1 });
 const TREND = { rising: "▲ in salita", falling: "▼ in calo", steady: "■ stabile" };
-let RANGE = 24, cache = null;
+let RANGE = 24, VIEW = null, cache = null;
+const ldf = new Intl.DateTimeFormat("it-IT", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
+const H36 = 36 * 3600e3;
+const getView = (tMax) => VIEW || { from: tMax - RANGE * 3600e3, to: tMax };
+const lab = (t, v) => (v.to - v.from > H36 ? ldf : tf).format(new Date(t));
+const toInput = (ms) => new Date(ms - new Date(ms).getTimezoneOffset() * 60000).toISOString().slice(0, 16);
 
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
@@ -114,11 +134,40 @@ async function getJson(path) {
   return r.json();
 }
 
+const seriesFor = (id) => (cache && cache.series && cache.series[id]) || [];
+const GAP_RECENT = 60 * 60e3, GAP_ARCHIVE = 8 * 3600e3;   // oltre questi intervalli il grafico mostra un buco
+
+// Unisce archivio (dati vecchi, ridotti) e storico recente in una sola serie per stazione.
+function buildSeries() {
+  const rec = {};
+  for (const h of cache.history) {
+    const t = new Date(h.t).getTime();
+    for (const id in h.v) {
+      if (h.v[id] == null) continue;
+      (rec[id] = rec[id] || []).push({ t, v: h.v[id], f: h.f ? h.f[id] : null, a: false });
+    }
+  }
+  const arch = (cache.archive && cache.archive.p) || {};
+  const out = {};
+  for (const id of new Set([...Object.keys(rec), ...Object.keys(arch)])) {
+    const r = rec[id] || [];
+    const cut = r.length ? r[0].t : Infinity;
+    const old = (arch[id] || []).filter((p) => p[0] * 1000 < cut)
+      .map((p) => ({ t: p[0] * 1000, v: p[1], f: p[2], a: true }));
+    out[id] = old.concat(r);
+  }
+  cache.series = out;
+}
+
 async function refresh() {
   try {
-    const [latest, history] = await Promise.all([getJson("data/latest.json"), getJson("data/history.json")]);
-    cache = { latest, history };
+    const latest = await getJson("data/latest.json");
+    const same = cache && cache.latest.updated === latest.updated;
+    const history = same ? cache.history : await getJson("data/history.json");
+    cache = { latest, history, archive: cache ? cache.archive : null, series: same ? cache.series : null };
+    if (!cache.series) buildSeries();
     render();
+    loadArchive();
   } catch (e) {
     $("#meta").textContent = "";
     const b = $("#banner");
@@ -127,63 +176,136 @@ async function refresh() {
   }
 }
 
-function chart(id, tMax, soglie) {
-  const from = tMax - RANGE * 3600e3;
-  const pts = cache.history
-    .map((h) => ({ t: new Date(h.t).getTime(), v: h.v[id] }))
-    .filter((p) => p.v != null && p.t >= from);
-  if (pts.length < 2) return '<p class="small">Il grafico compare dopo due letture.</p>';
+// I dati più vecchi di due settimane stanno in un file a parte, che si scarica una volta
+// e di nuovo solo quando lo script ha spostato altri giorni (cambia l'inizio dello storico).
+let archiveFor, archiveBusy = false;
+async function loadArchive() {
+  const first = cache.history.length ? cache.history[0].t : null;
+  if (archiveBusy || first === archiveFor) return;
+  archiveBusy = true;
+  try {
+    const a = await getJson("data/archive.json");
+    if (cache) cache.archive = a;
+  } catch (e) {
+    if (cache) cache.archive = null;   // non c'è finché non è passato il primo giorno oltre le due settimane
+  }
+  archiveFor = first;
+  archiveBusy = false;
+  if (cache) { buildSeries(); render(); }
+}
+
+// Con migliaia di punti su un grafico largo 300 pixel: per ogni colonna di pixel
+// tengo primo, più basso, più alto e ultimo, così i picchi restano identici.
+function decimate(pts, from, to, buckets) {
+  if (pts.length <= buckets * 2) return pts;
+  const w = (to - from) / buckets, out = [];
+  let i = 0;
+  while (i < pts.length) {
+    const k = Math.floor((pts[i].t - from) / w);
+    let j = i, lo = i, hi = i;
+    while (j + 1 < pts.length && Math.floor((pts[j + 1].t - from) / w) === k) {
+      j++;
+      if (pts[j].v < pts[lo].v) lo = j;
+      if (pts[j].v > pts[hi].v) hi = j;
+    }
+    [...new Set([i, lo, hi, j])].sort((x, y) => x - y).forEach((n) => out.push(pts[n]));
+    i = j + 1;
+  }
+  return out;
+}
+
+function chart(id, v, soglie) {
+  const { from, to: tMax } = v;
   const W = 320, H = 120, pl = 36, pr = 8, pt = 8, pb = 18;
-  let min = Math.min(...pts.map((p) => p.v)), max = Math.max(...pts.map((p) => p.v));
+  const all = seriesFor(id).filter((p) => p.t >= from && p.t <= tMax);
+  if (all.length < 2) return '<p class="small">Nel periodo scelto ci sono meno di due letture, quindi il grafico non si può disegnare.</p>';
+  let min = Infinity, max = -Infinity;
+  for (const p of all) { if (p.v < min) min = p.v; if (p.v > max) max = p.v; }
+  const dataMax = max;
+  const pts = decimate(all, from, tMax, W - pl - pr);
   const near = (soglie || []).filter((s) => s >= min - 1.5 && s <= max + 1.5);
   near.forEach((s) => { min = Math.min(min, s - 0.1); max = Math.max(max, s + 0.1); });
   if (max - min < 0.2) { const c = (max + min) / 2; min = c - 0.1; max = c + 0.1; }
   const x = (t) => pl + ((t - from) / (tMax - from)) * (W - pl - pr);
-  const y = (v) => pt + ((max - v) / (max - min)) * (H - pt - pb);
-  const d = pts.map((p, i) => (i ? "L" : "M") + x(p.t).toFixed(1) + " " + y(p.v).toFixed(1)).join(" ");
+  const y = (val) => pt + ((max - val) / (max - min)) * (H - pt - pb);
+  // la linea si interrompe dove mancano i dati, invece di unire due punti lontani come se fosse tutto regolare
+  const segs = [];
+  pts.forEach((p, i) => {
+    const prev = pts[i - 1];
+    const lim = prev && prev.a ? GAP_ARCHIVE : GAP_RECENT;
+    if (!prev || p.t - prev.t > lim) segs.push([]);
+    segs[segs.length - 1].push(x(p.t).toFixed(1) + " " + y(p.v).toFixed(1));
+  });
+  const d = segs.map((s) => (s.length === 1 ? `M${s[0]}L${s[0]}` : "M" + s.join("L"))).join("");
   const last = pts[pts.length - 1];
-  return `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Andamento del livello, da ${nf.format(pts[0].v)} a ${nf.format(last.v)} metri">
+  return `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Andamento del livello, da ${nf.format(all[0].v)} a ${nf.format(last.v)} metri, massimo ${nf.format(dataMax)} metri">
     <line class="grid" x1="${pl}" x2="${W - pr}" y1="${y(max)}" y2="${y(max)}"/>
     <line class="grid" x1="${pl}" x2="${W - pr}" y1="${y(min)}" y2="${y(min)}"/>
     <text x="${pl - 4}" y="${y(max) + 3}" text-anchor="end">${nf.format(max)}</text>
     <text x="${pl - 4}" y="${y(min) + 3}" text-anchor="end">${nf.format(min)}</text>
-    <text x="${pl}" y="${H - 4}">${tf.format(new Date(from))}</text>
-    <text x="${W - pr}" y="${H - 4}" text-anchor="end">${tf.format(new Date(tMax))}</text>
+    <text x="${pl}" y="${H - 4}">${lab(from, v)}</text>
+    <text x="${W - pr}" y="${H - 4}" text-anchor="end">${lab(tMax, v)}</text>
     ${near.map((s) => { const k = s === soglie[0] ? "t1" : "t2"; return `<line class="thr ${k}" x1="${pl}" x2="${W - pr}" y1="${y(s)}" y2="${y(s)}"/><text class="${k}" x="${W - pr}" y="${y(s) - 3}" text-anchor="end">${k === "t1" ? "1°" : "2°"} livello di allerta · ${nf.format(s)} m s.z.i.</text>`; }).join("")}
     <path class="series" d="${d}"/>
     <circle class="dot" cx="${x(last.t).toFixed(1)}" cy="${y(last.v).toFixed(1)}" r="3.5"/>
   </svg>`;
 }
 
-function histTable(s, tMax) {
-  const from = tMax - RANGE * 3600e3;
-  const all = cache.history
-    .map((h) => ({ t: new Date(h.t), v: h.v[s.id], f: h.f ? h.f[s.id] : null }))
-    .filter((p) => p.v != null);
-  const rows = all
-    .map((p, i) => ({ ...p, d: i ? Math.round((p.v - all[i - 1].v) * 1000) / 1000 : null }))
-    .filter((p) => p.t.getTime() >= from)
-    .reverse();
-  if (!rows.length) return "";
+function histTable(s, v) {
+  const { from, to } = v;
+  const all = seriesFor(s.id);
+  const inRange = all.filter((p) => p.t >= from && p.t <= to);
+  if (!inRange.length) return '<p class="small">Nessuna lettura nel periodo scelto.</p>';
+  const rnd = (n) => Math.round(n * 1000) / 1000;
+
+  // periodi lunghi: una riga per fascia, col livello più alto della fascia (è quello che conta nelle piene)
+  const group = (ms) => {
+    const key = (p) => (ms >= 86400e3 ? new Date(p.t).toDateString() : Math.floor(p.t / ms));
+    const out = [];
+    let k = null;
+    for (const p of inRange) {
+      if (key(p) !== k) { k = key(p); out.push(p); }
+      else if (p.v > out[out.length - 1].v) out[out.length - 1] = p;
+    }
+    return out;
+  };
+  let rows = inRange, step = null;
+  if (inRange.length > 700) {
+    for (const [ms, label] of [[3600e3, "all’ora"], [6 * 3600e3, "ogni 6 ore"], [86400e3, "al giorno"]]) {
+      rows = group(ms); step = label;
+      if (rows.length <= 800) break;
+    }
+  }
+  const before = step ? null : all[all.indexOf(inRange[0]) - 1];
+  rows = rows.map((p, j) => ({ ...p, d: j ? rnd(p.v - rows[j - 1].v) : before ? rnd(p.v - before.v) : null })).reverse();
+
   const [a, b] = s.soglie && s.soglie.length === 2 ? s.soglie : [Infinity, Infinity];
   let body = "", lastDay = "";
   for (const r of rows) {
-    const day = dayf.format(r.t);
+    const t = new Date(r.t);
+    const day = dayf.format(t);
     if (day !== lastDay) { body += `<tr class="day"><td colspan="4">${esc(day)}</td></tr>`; lastDay = day; }
     const cls = r.v >= b ? "r2" : r.v >= a ? "r1" : "";
     const up = r.d != null && r.d > 0.02, down = r.d != null && r.d < -0.02;
     const dc = r.d == null ? "" : up ? "up" : down ? "down" : "flat";
     const sign = up ? "▲" : down ? "▼" : "■";
-    body += `<tr class="${cls}"><td>${tf.format(r.t)}</td><td><strong>${nf.format(r.v)}</strong></td>` +
+    body += `<tr class="${cls}"><td>${tf.format(t)}</td><td><strong>${nf.format(r.v)}</strong></td>` +
       `<td class="${dc}">${r.d == null ? "–" : `${sign} ${nfs.format(r.d)}`}</td>` +
       `<td>${r.f != null ? nf1.format(r.f) : "–"}</td></tr>`;
+  }
+  const firstRecent = (all.find((p) => !p.a) || {}).t;
+  let notes = "Barra gialla: sopra il 1° livello di allerta. Barra rossa: sopra il 2°.";
+  if (step) notes += ` Periodo lungo: una riga ${step}, con il livello più alto.`;
+  if (rows.some((r) => r.a) && firstRecent) {
+    const cm = Math.round(((cache.archive && cache.archive.eps) || 0.02) * 100);
+    notes += ` Prima del ${ldf.format(new Date(firstRecent))} i dati sono ridotti: restano le letture in cui il livello cambia, e il grafico non si sposta di più di ${cm} cm.`;
   }
   return `<h3 class="hist-title">Storico delle letture</h3>
     <div class="table-wrap" tabindex="0" role="region" aria-label="Storico delle letture di ${esc(s.name)}">
       <table class="hist"><thead><tr><th>Ora</th><th>Livello (m)</th><th>Variazione</th><th>Portata (m³/s)</th></tr></thead>
       <tbody>${body}</tbody></table>
     </div>
-    <p class="small">Barra gialla: sopra il 1° livello di allerta. Barra rossa: sopra il 2°.</p>`;
+    <p class="small">${notes}</p>`;
 }
 
 function info(s) {
@@ -221,6 +343,9 @@ function render() {
   }
 
   const tMax = updated ? updated.getTime() : Date.now();
+  const view = getView(tMax);
+  setBounds(tMax);
+  const keep = [...document.querySelectorAll(".table-wrap")].map((e) => e.scrollTop);
   const prevTimes = history.map((h) => new Date(h.t).getTime());
   const gap = prevTimes.length > 1 ? Math.round((prevTimes.at(-1) - prevTimes.at(-2)) / 60000) : null;
 
@@ -233,19 +358,85 @@ function render() {
       <p class="level">${nf.format(s.level)} <small>m</small></p>
       <p class="delta">${s.delta == null ? "Prima lettura" : `${nfs.format(s.delta)} m rispetto alla lettura precedente${gap ? ` (${gap} min prima)` : ""}`}</p>
       ${info(s)}
-      ${chart(s.id, tMax, s.soglie)}
-      ${histTable(s, tMax)}
+      ${chart(s.id, view, s.soglie)}
+      ${histTable(s, view)}
       <details><summary>Riga letta dal CFR</summary><p>${esc(s.raw)}</p></details>
     </article>`).join("");
+  document.querySelectorAll(".table-wrap").forEach((e, i) => { if (keep[i]) e.scrollTop = keep[i]; });
 }
 
-document.querySelectorAll(".range button").forEach((btn) =>
+function firstTime() {
+  if (!cache || !cache.series) return null;
+  let m = Infinity;
+  for (const id in cache.series) { const s = cache.series[id]; if (s.length && s[0].t < m) m = s[0].t; }
+  return m === Infinity ? null : m;
+}
+
+function setBounds(tMax) {
+  const f = firstTime();
+  if (f == null) return;
+  $("#from").min = $("#to").min = toInput(f);
+  $("#from").max = $("#to").max = toInput(tMax);
+}
+
+const presets = () => document.querySelectorAll(".range button[data-h]");
+const panel = () => $("#custom");
+function markPressed(active) {
+  presets().forEach((b) => b.setAttribute("aria-pressed", String(b === active)));
+  $("#customBtn").setAttribute("aria-pressed", String(active === null));
+}
+
+presets().forEach((btn) =>
   btn.addEventListener("click", () => {
     RANGE = Number(btn.dataset.h);
-    document.querySelectorAll(".range button").forEach((b) => b.setAttribute("aria-pressed", String(b === btn)));
+    VIEW = null;
+    markPressed(btn);
+    panel().hidden = true;
+    $("#customBtn").setAttribute("aria-expanded", "false");
     if (cache) render();
   })
 );
+
+$("#customBtn").addEventListener("click", () => {
+  const open = panel().hidden;
+  panel().hidden = !open;
+  $("#customBtn").setAttribute("aria-expanded", String(open));
+  if (open && cache) {
+    const tMax = cache.latest.updated ? new Date(cache.latest.updated).getTime() : Date.now();
+    setBounds(tMax);
+    const f = firstTime();
+    $("#customNote").className = "small";
+    $("#customNote").textContent = f != null ? "Storico disponibile dal " + ldf.format(new Date(f)) + "." : "";
+    if (!$("#from").value || !$("#to").value) {
+      const cur = getView(tMax);
+      $("#from").value = toInput(cur.from);
+      $("#to").value = toInput(cur.to);
+    }
+  }
+});
+
+panel().addEventListener("submit", (e) => {
+  e.preventDefault();
+  const note = $("#customNote");
+  let from = new Date($("#from").value).getTime();
+  const to = new Date($("#to").value).getTime();
+  if (isNaN(from) || isNaN(to) || from >= to) {
+    note.className = "small err";
+    note.textContent = "Scegli un inizio precedente alla fine.";
+    return;
+  }
+  const f = firstTime();
+  note.className = "small";
+  if (f != null && from < f) {
+    from = f;
+    note.textContent = "Prima del " + ldf.format(new Date(f)) + " non ci sono dati: parto da lì.";
+  } else if (f != null) {
+    note.textContent = "Storico disponibile dal " + ldf.format(new Date(f)) + ".";
+  }
+  VIEW = { from, to };
+  markPressed(null);
+  if (cache) render();
+});
 document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
 setInterval(refresh, 60000);
 refresh();

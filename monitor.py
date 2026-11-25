@@ -8,6 +8,16 @@ Come funziona
   ne pubblica una ogni pochi minuti, di recente circa ogni 5) viene salvata in
   data/history.json. Un controllo senza dati nuovi non salva e non notifica.
 
+Dove finiscono i dati
+  data/history.json: le ultime due settimane, una lettura ogni pochi minuti.
+  data/archive.json: tutto ciò che è più vecchio, compresso. Restano solo le
+  letture in cui il livello cambia davvero (salite, discese, picchi): ogni
+  lettura tolta sta a meno di 2 cm dalla linea del grafico, quindi il grafico
+  non cambia. Nei tratti fermi resta comunque almeno un punto ogni 6 ore, così
+  un buco nei dati non si confonde con un livello costante. Lo spostamento in
+  archivio avviene una volta al giorno circa; se fallisce, lo storico recente
+  non viene toccato e le notifiche non ne risentono.
+
 Quando arrivano le notifiche di andamento
   Solo quando il livello è "in zona": arriva a 0,5 m sotto il 1° livello di
   allerta (a Vecchiano 7,00 m, con il 1° livello a 7,50 m) oppure al valore
@@ -56,7 +66,11 @@ UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
 EPS = 0.02            # metri: una lettura che cambia meno di così conta come "stabile"
 NOTIFY_EVERY_MIN = 15 # minuti tra due notifiche mentre il livello continua a salire
 FLAT_READINGS = 3     # letture di fila senza salita prima di dire "livello stabile"
-MAX_HISTORY = 900     # letture conservate (circa 3 giorni, con letture ogni 5 minuti)
+KEEP_DAYS = 14        # giorni a piena risoluzione in data/history.json
+MAX_HISTORY = 6000    # tetto di sicurezza se lo spostamento in archivio non riesce
+ARCHIVE_EPS = 0.02    # metri: di quanto può spostarsi il grafico nei dati archiviati
+ARCHIVE_MAX_GAP_H = 6 # ore: in archivio resta almeno un punto ogni 6 ore
+ARCHIVE_BATCH = 288   # letture da spostare in archivio per volta (circa un giorno)
 STALE_MIN = 60      # minuti senza nuovi dati prima di avvisare
 CET = timezone(timedelta(hours=1))  # il CFR pubblica in ora solare
 
@@ -74,9 +88,11 @@ def load_json(path, default=None):
         return default
 
 
-def save_json(path, obj):
+def save_json(path, obj, compact=False):
     Path(path).parent.mkdir(parents=True, exist_ok=True)
-    Path(path).write_text(json.dumps(obj, ensure_ascii=False, indent=1), encoding="utf-8")
+    text = (json.dumps(obj, ensure_ascii=False, separators=(",", ":")) if compact
+            else json.dumps(obj, ensure_ascii=False, indent=1))
+    Path(path).write_text(text, encoding="utf-8")
 
 
 def fm(x):
@@ -102,6 +118,75 @@ def send_ntfy(title, message, priority=3, tags=None):
         requests.post("https://ntfy.sh/", json=payload, timeout=20).raise_for_status()
     except Exception as exc:  # una notifica fallita non deve fermare il resto
         print("Invio notifica fallito:", exc)
+
+
+# ---------- archivio dei dati vecchi ----------
+
+def simplify(pts, eps=ARCHIVE_EPS, max_gap=ARCHIVE_MAX_GAP_H * 3600):
+    """pts: lista di (secondi, livello, portata) in ordine di tempo.
+    Toglie le letture che stanno a meno di eps metri dalla retta tra due letture
+    tenute (Douglas-Peucker con errore verticale): restano salite, discese e
+    picchi. Primo e ultimo punto restano sempre. Nei tratti fermi si tiene un
+    punto ogni max_gap secondi, così un buco nei dati si distingue da un livello
+    costante."""
+    n = len(pts)
+    if n <= 2:
+        return list(pts)
+    keep = [False] * n
+    keep[0] = keep[-1] = True
+    stack = [(0, n - 1)]
+    while stack:
+        a, b = stack.pop()
+        if b - a < 2:
+            continue
+        t0, v0 = pts[a][0], pts[a][1]
+        t1, v1 = pts[b][0], pts[b][1]
+        span = t1 - t0
+        worst, at = -1.0, None
+        for i in range(a + 1, b):
+            line = v0 + (v1 - v0) * (pts[i][0] - t0) / span if span else v0
+            d = abs(pts[i][1] - line)
+            if d > worst:
+                worst, at = d, i
+        if worst > eps:
+            split = at
+        elif span > max_gap:
+            mid = t0 + span / 2
+            split = min(range(a + 1, b), key=lambda i: abs(pts[i][0] - mid))
+        else:
+            continue
+        keep[split] = True
+        stack.append((a, split))
+        stack.append((split, b))
+    return [pt for pt, k in zip(pts, keep) if k]
+
+
+def rotate(history, archive, latest_stamp):
+    """Sposta in archivio, compresse, le letture più vecchie di KEEP_DAYS.
+    Si muove solo quando ce ne sono almeno ARCHIVE_BATCH, quindi circa una
+    volta al giorno. Ritorna (storico, archivio, spostato). Ogni lettura viene
+    compressa una volta sola, quindi l'errore non si accumula nel tempo."""
+    cutoff = latest_stamp - timedelta(days=KEEP_DAYS)
+    if not history or datetime.fromisoformat(history[0]["t"]) >= cutoff:
+        return history, archive, False
+    old = [h for h in history if datetime.fromisoformat(h["t"]) < cutoff]
+    if len(old) < ARCHIVE_BATCH:
+        return history, archive, False
+    points = archive.setdefault("p", {})
+    for sid in sorted({k for h in old for k in h["v"]}):
+        series = [(int(datetime.fromisoformat(h["t"]).timestamp()), h["v"][sid], (h.get("f") or {}).get(sid))
+                  for h in old if h["v"].get(sid) is not None]
+        dest = points.setdefault(sid, [])
+        last_t = dest[-1][0] if dest else -1
+        for t, level, flow in simplify(series):
+            if t > last_t:
+                dest.append([t, round(level, 3), None if flow is None else round(flow, 1)])
+    archive.update({
+        "v": 1, "eps": ARCHIVE_EPS, "max_gap_h": ARCHIVE_MAX_GAP_H,
+        "until": int(datetime.fromisoformat(old[-1]["t"]).timestamp()),
+    })
+    rest = [h for h in history if datetime.fromisoformat(h["t"]) >= cutoff]
+    return rest, archive, True
 
 
 # ---------- lettura dal CFR ----------
@@ -416,9 +501,16 @@ def process(body, html, rows, now):
     state["last_stamp"] = stamp_iso
     history.append({"t": stamp_iso, "v": {c["id"]: c["level"] for c in cards},
                     "f": {c["id"]: c["flow"] for c in cards}})
+    try:
+        rest, archive, moved = rotate(history, load_json(DATA / "archive.json", {}), stamp)
+        if moved:
+            save_json(DATA / "archive.json", archive, compact=True)
+            history = rest   # lo storico si accorcia solo dopo aver salvato l'archivio
+    except Exception:
+        traceback.print_exc()   # l'archivio è un extra: un errore qui non ferma il monitoraggio
     history = history[-MAX_HISTORY:]
 
-    save_json(DATA / "history.json", history)
+    save_json(DATA / "history.json", history, compact=True)
     save_json(DATA / "latest.json", {
         "ok": True,
         "updated": stamp_iso,
